@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Existing public release tag to announce (for example v0.9.1)'
+        description: 'Existing public release tag to announce (for example v0.9.4)'
         required: true
         type: string
 
@@ -58,7 +58,7 @@ jobs:
           notes = release.get('body') or 'See the release page for details.'
           if len(notes) > 3500:
               notes = notes[:3500] + '\n\nRead the full notes on GitHub.'
-          payload = {'username': 'miixprokey Updates', 'allowed_mentions': {'parse': []},
+          payload = {'username': 'MiixKey Updates', 'allowed_mentions': {'parse': []},
                      'embeds': [{'title': (release.get('name') or tag)[:256],
                        'url': release['html_url'], 'description': notes, 'color': 3542968,
                        'fields': [{'name': 'Windows 11 x64', 'value': '[Download installer](' + asset['browser_download_url'] + ')'}],

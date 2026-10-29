@@ -71,9 +71,30 @@ jobs:
               return item
 
           dmg = asset(f'MiixKey-macOS-{version}-arm64.dmg')
-          bundle = asset(f'MiixKey-macOS-{version}-download-bundle.zip')
-          checksums = asset('SHA256SUMS.txt')
-          asset('VALIDATION.json')
+          related_downloads = []
+          for category, filename, label in [
+              ('build', f'MiixKey-macOS-{version}-build-artifacts.zip', 'Application ZIP (ready to run)'),
+              ('build', f'MiixKey-macOS-{version}-build-kit.zip', 'Developer build kit'),
+              ('source', f'MiixKey-macOS-{version}-source.zip', 'Application source')]:
+              related_tag = f'macos-{category}-v{version}'
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{repo}/releases/tags/{quote(related_tag, safe="")}',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'User-Agent': 'miixkey-macos-release'})
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      related = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      continue
+                  raise
+              if related['draft'] or related['tag_name'] != related_tag:
+                  continue
+              expected_url = f'https://github.com/{repo}/releases/download/{related_tag}/{filename}'
+              if any(a['name'] == filename and a['state'] == 'uploaded' and a['size'] > 0
+                     and a['browser_download_url'] == expected_url for a in related['assets']):
+                  related_downloads.append(f'[{label}]({expected_url})')
+          optional_downloads = ('\n'.join(related_downloads) + '\n') if related_downloads else ''
           status = 'Pre-release' if release['prerelease'] else 'Release'
           title = f'MiixKey {version} for macOS — Apple Silicon ({status})'
           # English-only user instructions, independent of release-body language.
@@ -83,11 +104,13 @@ jobs:
               'This installer is not for Intel Macs or Windows.\n\n'
               '**What to download**\n'
               f'[Download MiixKey-macOS-{version}-arm64.dmg]({dmg["browser_download_url"]}) — recommended for normal installation.\n'
-              f'[Download the installer and handoff bundle]({bundle["browser_download_url"]}) — optional ZIP containing the same DMG and detailed handoff documents. '
-              'The handoff documents are currently in Chinese. Do not use GitHub\'s automatic Source code archives to install the app.\n\n'
+              + optional_downloads +
+              'The application ZIP is an alternative to the DMG: extract it and copy MiixKey.app into Applications. '
+              'Source and the build kit are for developers and are not required to run MiixKey. '
+              'Do not use GitHub\'s automatic Source code archives to install the app.\n\n'
               '**Install and start**\n'
               '1. Save your work, back up your vault, and quit any previous MiixKey app.\n'
-              '2. Open the downloaded DMG. If you downloaded the ZIP bundle, extract it first and open the DMG inside.\n'
+              '2. Open the downloaded DMG.\n'
               '3. Drag MiixKey into Applications, then eject the installer disk image.\n'
               '4. Open MiixKey from Applications. This build is ad-hoc signed and is not Apple Developer ID signed or notarized. '
               'If macOS blocks it, after verifying that you downloaded this official release, open System Settings > Privacy & Security and use Open Anyway if offered, then confirm Open.\n'
@@ -95,7 +118,7 @@ jobs:
               'Enable USB Mode on the device when accessing its vault files; safely eject the device volume before leaving USB Mode.\n\n'
               'Runtime dependencies are included; no development tools are needed. Automatic updates are removed; install future releases manually. '
               'This download updates the Mac application, not device firmware.\n\n'
-              f'[Checksums]({checksums["browser_download_url"]}) · [Release notes and known limitations]({release_url})'
+              f'[Release notes and known limitations]({release_url})'
           )
           payload = {'username': 'MiixKey Updates', 'allowed_mentions': {'parse': []},
                      'embeds': [{'title': title, 'url': release_url, 'description': description,

@@ -1,0 +1,118 @@
+name: Notify Discord about macOS releases
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing public macOS release tag to announce (for example macos-v0.9.4)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-macos-release-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'macos-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send public macOS application release to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.request, urllib.error
+          from urllib.parse import quote
+
+          # Reuse the public installer channel. Never announce private source/build tags.
+          repo = os.environ['GITHUB_REPOSITORY']
+          if repo != 'Miixpro/miixprokey-releases':
+              raise SystemExit('This workflow is restricted to the public installer repository.')
+          if int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')) != 1:
+              raise SystemExit('Check Discord before sending another notification. Use a new manual dispatch only if needed.')
+          webhook = os.environ.get('DISCORD_WEBHOOK_URL', '').strip()
+          if not re.fullmatch(r'https://(?:discord\.com|discordapp\.com)/api/webhooks/\d+/[A-Za-z0-9_.-]+', webhook):
+              raise SystemExit('Configure the DISCORD_WEBHOOK_URL repository secret with a Discord webhook URL.')
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as f:
+              event = json.load(f)
+          tag = event.get('release', {}).get('tag_name') or os.environ['RELEASE_TAG']
+          match = re.fullmatch(r'macos-v(\d+\.\d+\.\d+)', tag)
+          if not match:
+              raise SystemExit('Only public macos-vMAJOR.MINOR.PATCH installer tags can be announced.')
+          version = match.group(1)
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/{repo}/releases/tags/{quote(tag, safe="")}',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                       'Accept': 'application/vnd.github+json', 'User-Agent': 'miixkey-macos-release'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              release = json.load(response)
+          release_url = f'https://github.com/{repo}/releases/tag/{tag}'
+          if release['draft'] or release['tag_name'] != tag or release['html_url'] != release_url:
+              raise SystemExit('A matching published public macOS release is required.')
+          prefix = f'https://github.com/{repo}/releases/download/{tag}/'
+
+          def asset(name):
+              matches = [a for a in release['assets'] if a['name'] == name]
+              if len(matches) != 1:
+                  raise SystemExit('Required public attachment is missing: ' + name)
+              item = matches[0]
+              if item['state'] != 'uploaded' or item['size'] <= 0 or item['browser_download_url'] != prefix + name:
+                  raise SystemExit('Required public attachment is not ready: ' + name)
+              return item
+
+          dmg = asset(f'MiixKey-macOS-{version}-arm64.dmg')
+          bundle = asset(f'MiixKey-macOS-{version}-download-bundle.zip')
+          checksums = asset('SHA256SUMS.txt')
+          asset('VALIDATION.json')
+          status = 'Pre-release' if release['prerelease'] else 'Release'
+          title = f'MiixKey {version} for macOS — Apple Silicon ({status})'
+          # English-only user instructions, independent of release-body language.
+          description = (
+              f'MiixKey {version} for macOS is available.\n\n'
+              '**Requirements:** An Apple Silicon Mac (M-series), macOS 13 or later, and a MiixKey v2 device. '
+              'This installer is not for Intel Macs or Windows.\n\n'
+              '**What to download**\n'
+              f'[Download MiixKey-macOS-{version}-arm64.dmg]({dmg["browser_download_url"]}) — recommended for normal installation.\n'
+              f'[Download the installer and handoff bundle]({bundle["browser_download_url"]}) — optional ZIP containing the same DMG and detailed handoff documents. '
+              'The handoff documents are currently in Chinese. Do not use GitHub\'s automatic Source code archives to install the app.\n\n'
+              '**Install and start**\n'
+              '1. Save your work, back up your vault, and quit any previous MiixKey app.\n'
+              '2. Open the downloaded DMG. If you downloaded the ZIP bundle, extract it first and open the DMG inside.\n'
+              '3. Drag MiixKey into Applications, then eject the installer disk image.\n'
+              '4. Open MiixKey from Applications. This build is ad-hoc signed and is not Apple Developer ID signed or notarized. '
+              'If macOS blocks it, after verifying that you downloaded this official release, open System Settings > Privacy & Security and use Open Anyway if offered, then confirm Open.\n'
+              '5. Connect and unlock your MiixKey v2. Select the required card on the device, then use the corresponding app page. '
+              'Enable USB Mode on the device when accessing its vault files; safely eject the device volume before leaving USB Mode.\n\n'
+              'Runtime dependencies are included; no development tools are needed. Automatic updates are removed; install future releases manually. '
+              'This download updates the Mac application, not device firmware.\n\n'
+              f'[Checksums]({checksums["browser_download_url"]}) · [Release notes and known limitations]({release_url})'
+          )
+          payload = {'username': 'MiixKey Updates', 'allowed_mentions': {'parse': []},
+                     'embeds': [{'title': title, 'url': release_url, 'description': description,
+                                 'color': 3542968, 'footer': {'text': repo + ' • ' + tag}}]}
+          if len(description) > 4096 or len(title) > 256 or re.search(r'[\u3400-\u9fff]', description + title):
+              raise SystemExit('Notification text failed length or English-language checks.')
+          request = urllib.request.Request(webhook + '?wait=true',
+              data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json',
+              'User-Agent': 'miixkey-macos-release'}, method='POST')
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              if not result.get('id'):
+                  raise SystemExit('Discord did not return a message confirmation; check the channel before retrying.')
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f'Discord rejected the notification (HTTP {error.code}); check the channel before retrying.') from None
+          except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+              raise SystemExit('Discord delivery is uncertain. Check the channel before rerunning.') from None
+          print('Discord confirmed the macOS release notification. Message ID: ' + str(result['id']))
+          PY
